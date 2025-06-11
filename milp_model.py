@@ -113,7 +113,6 @@ def create_milp_model(V_np, W_np, l_dim):
     # m_vx_ik_val[i] = - sum over p of abs(V_np[i,p])
     M_vx_row_abs_sum = [np.sum(np.abs(V_np[i, :])) for i in range(d_dim)]
 
-
     for i in range(d_dim):
         for k in range(l_dim):
             current_VX_sum_terms = []
@@ -164,7 +163,6 @@ def create_milp_model(V_np, W_np, l_dim):
                 model.Add(term_prod_var <= Y_ik - m_Y_val * (1 - s_bin_kj))
                 # term_prod_var >= Y_ik - M_Y_val * (1 - s_bin_kj)
                 model.Add(term_prod_var >= Y_ik - M_Y_val * (1 - s_bin_kj))
-
                 current_F_sum_terms.append(term_prod_var)
 
             if not current_F_sum_terms: # Should not happen if l_dim > 0
