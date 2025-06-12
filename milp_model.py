@@ -59,48 +59,59 @@ def create_milp_model(V_np, W_np, l_dim):
             else:
                 model.Add(Q_vars_list[a][b] == cp.LinearExpr.Sum(current_Q_sum_terms))
 
-    # 6. Create S_vars (l_dim x l_dim matrix of model variables for sign(Q))
-    S_vars_list = [[model.NewIntVar(-1, 1, f'S_{a}_{b}') for b in range(l_dim)] for a in range(l_dim)]
-    # Store is_pos, is_neg, is_zero for S to be used in F_vars linearization
-    S_is_pos_vars = [[model.NewBoolVar(f'is_S_pos_{a}_{b}') for b in range(l_dim)] for a in range(l_dim)]
-    S_is_neg_vars = [[model.NewBoolVar(f'is_S_neg_{a}_{b}') for b in range(l_dim)] for a in range(l_dim)]
-    S_is_zero_vars = [[model.NewBoolVar(f'is_S_zero_{a}_{b}') for b in range(l_dim)] for a in range(l_dim)]
+    # 6. Create S_vars (l_dim x l_dim matrix of model variables for sign(Q) - {0,1} valued)
+    # S_ab = 1 if Q_ab > 0, else S_ab = 0 if Q_ab <= 0
+    S_vars_list = [[model.NewBoolVar(f'S_{a}_{b}') for b in range(l_dim)] for a in range(l_dim)]
 
-    M_q_max_abs_W = np.max(np.abs(W_np))
-    if M_q_max_abs_W == 0 : # Handle case where W is all zeros
-        M_q = epsilon
+    # Calculate M_q for bounds on Q_ab
+    # M_q is the maximum possible absolute value of any element in Q.
+    # Each element Q_ab = sum_{c,e} X_ca * W_ce * X_eb. Max val is sum_{c,e} |W_ce|.
+    # A simpler, generally safe upper bound for |Q_ab|: d_dim * d_dim * max_abs_W
+    max_abs_W_val = np.max(np.abs(W_np))
+    if max_abs_W_val == 0 and d_dim > 0: # W is all zeros
+        M_q = epsilon # Q will always be 0
+    elif d_dim == 0:
+        M_q = 0 # Q is empty
     else:
-        M_q = d_dim * d_dim * M_q_max_abs_W + epsilon
-
+        M_q = d_dim * d_dim * max_abs_W_val
+        # If Q_ab involves sums, it can be sum over d_dim*d_dim terms. Each term is W_ce * X_ca * X_eb. Max value of X*X is 1.
+        # So, Q_ab can be sum of d_dim*d_dim * W_ce values. Max Q_ab is sum of all abs(W_ce).
+        # A slightly looser but common bound is d_dim * d_dim * np.max(np.abs(W_np)). Let's stick to this.
 
     for a in range(l_dim):
         for b in range(l_dim):
-            Q_ab = Q_vars_list[a][b]
-            S_ab = S_vars_list[a][b]
+            Q_ab_val = Q_vars_list[a][b]
+            S_ab = S_vars_list[a][b] # This is now a BoolVar
 
-            is_pos_ab = S_is_pos_vars[a][b] # model.NewBoolVar(f'is_pos_Q_{a}_{b}')
-            is_neg_ab = S_is_neg_vars[a][b] # model.NewBoolVar(f'is_neg_Q_{a}_{b}')
-            is_zero_ab = S_is_zero_vars[a][b] # model.NewBoolVar(f'is_zero_Q_{a}_{b}')
+            # Constraints for S_ab based on Q_ab_val:
+            # S_ab = 1  => Q_ab_val >= epsilon
+            # S_ab = 0  => Q_ab_val <= 0 (this means Q_ab can be 0 or negative)
 
-            model.Add(is_pos_ab + is_neg_ab + is_zero_ab == 1)
-            model.Add(S_ab == is_pos_ab - is_neg_ab)
+            model.Add(Q_ab_val >= epsilon).OnlyEnforceIf(S_ab)
+            if M_q > 0 : # Only add if M_q is meaningful
+                 model.Add(Q_ab_val <= M_q).OnlyEnforceIf(S_ab) # Upper bound for Q when S_ab is 1
 
-            # Constraints for sign definition
-            model.Add(Q_ab >= epsilon).OnlyEnforceIf(is_pos_ab)
-            model.Add(Q_ab <= M_q).OnlyEnforceIf(is_pos_ab) # Upper bound for positive Q
+            model.Add(Q_ab_val <= 0).OnlyEnforceIf(S_ab.Not())
+            if M_q > 0: # Only add if M_q is meaningful
+                model.Add(Q_ab_val >= -M_q).OnlyEnforceIf(S_ab.Not()) # Lower bound for Q when S_ab is 0
 
-            model.Add(Q_ab <= -epsilon).OnlyEnforceIf(is_neg_ab)
-            model.Add(Q_ab >= -M_q).OnlyEnforceIf(is_neg_ab) # Lower bound for negative Q
-
-            model.Add(Q_ab == 0).OnlyEnforceIf(is_zero_ab)
-            # model.Add(Q_ab > -epsilon).OnlyEnforceIf(is_zero_ab) # Redundant given Q_ab == 0
-            # model.Add(Q_ab < epsilon).OnlyEnforceIf(is_zero_ab)  # Redundant given Q_ab == 0
-
+            # If M_q is 0 (e.g. W is all zeros), then Q_ab_val must be 0.
+            # In this case, S_ab=1 implies 0 >= epsilon (impossible, so S_ab must be 0).
+            # S_ab=0 implies 0 <= 0 (true). So S_ab will correctly be 0.
+            # The above constraints handle M_q=0 case correctly by potentially creating trivial conflicts if S_ab=1.
 
     # 7. Create VX_prod_vars (d_dim x l_dim matrix for V @ X)
+    # VX_ik = sum_j V_ij * X_jk. Max value of X_jk is 1 or -1.
+    # So, M_vx_ik = sum_j |V_ij|. m_vx_ik = -sum_j |V_ij|.
     VX_prod_vars_list = [[model.NewIntVar(-cp.INT_MAX, cp.INT_MAX, f'VX_{i}_{k}') for k in range(l_dim)] for i in range(d_dim)]
-    M_vx_ik_abs_sum_V_row = [sum(abs(V_np[i,j]) for j in range(d_dim)) for i in range(d_dim)]
+    # M_vx_ik_abs_sum_V_row = [sum(abs(V_np[i,j_col_V]) for j_col_V in range(d_dim)) for i in range(d_dim)]
 
+    # Calculate m_vx_ik and M_vx_ik for each VX_prod_vars_list[i][k]
+    # These bounds depend on V_np[i,:]
+    # VX_ik = sum_p V_np[i,p] * X_pk where X_pk is +/-1
+    # M_vx_ik_val[i] = sum over p of abs(V_np[i,p])
+    # m_vx_ik_val[i] = - sum over p of abs(V_np[i,p])
+    M_vx_row_abs_sum = [np.sum(np.abs(V_np[i, :])) for i in range(d_dim)]
 
     for i in range(d_dim):
         for k in range(l_dim):
@@ -120,40 +131,38 @@ def create_milp_model(V_np, W_np, l_dim):
     F_vars_list = [[model.NewIntVar(-cp.INT_MAX, cp.INT_MAX, f'F_{i}_{j}') for j in range(l_dim)] for i in range(d_dim)]
 
     for i in range(d_dim): # F is d_dim x l_dim
-        # Max possible value for VX_prod_vars_list[i][k] for a given i
-        # This is sum over p of abs(V_np[i,p]) * max_abs_X, and max_abs_X is 1
-        M_vx_ik = M_vx_ik_abs_sum_V_row[i]
+        # Bounds for VX_ik = Y
+        # M_vx_ik_val = sum(abs(V_np[i,:])) for row i
+        # m_vx_ik_val = -sum(abs(V_np[i,:])) for row i
+        M_Y_val = M_vx_row_abs_sum[i]
+        m_Y_val = -M_vx_row_abs_sum[i]
 
         for j in range(l_dim):
             current_F_sum_terms = []
-            for k in range(l_dim): # (V@X) is d_dim x l_dim, S is l_dim x l_dim
-                VX_ik = VX_prod_vars_list[i][k]
-                # S_kj = S_vars_list[k][j] # This is -1, 0, or 1
+            for k_col_S in range(l_dim): # (V@X) is d_dim x l_dim, S is l_dim x l_dim. Sum over k_col_S
+                Y_ik = VX_prod_vars_list[i][k_col_S]
+                s_bin_kj = S_vars_list[k_col_S][j] # This is now a BoolVar {0,1}
 
-                # Linearize VX_ik * S_kj
-                # Let Y = VX_ik and s_val = S_kj. We want Z = Y*s_val.
-                s_is_1_kj = S_is_pos_vars[k][j] # model.NewBoolVar(f's_is_1_{k}_{j}_for_F')
-                s_is_neg1_kj = S_is_neg_vars[k][j] # model.NewBoolVar(f's_is_neg1_{k}_{j}_for_F')
-                # s_is_0_kj directly from S_is_zero_vars[k][j]
+                # Linearize Y_ik * s_bin_kj using McCormick envelope
+                # term_prod_var = Y_ik * s_bin_kj
+                # Bounds for term_prod_var:
+                # If s_bin_kj = 0, term_prod_var = 0.
+                # If s_bin_kj = 1, term_prod_var = Y_ik (which is between m_Y_val and M_Y_val).
+                # So, overall min bound is min(0, m_Y_val) and max bound is max(0, M_Y_val).
+                min_prod_bound = min(0, m_Y_val)
+                max_prod_bound = max(0, M_Y_val)
 
-                # model.Add(S_vars_list[k][j] == 1).OnlyEnforceIf(s_is_1_kj) # Already defined
-                # model.Add(S_vars_list[k][j] == -1).OnlyEnforceIf(s_is_neg1_kj) # Already defined
-                # model.Add(S_vars_list[k][j] == 0).OnlyEnforceIf(S_is_zero_vars[k][j]) # Already defined
-                # model.Add(s_is_1_kj + s_is_neg1_kj + S_is_zero_vars[k][j] == 1) # Already defined
+                term_prod_var = model.NewIntVar(int(min_prod_bound), int(max_prod_bound), f'TermF_{i}_{j}_{k_col_S}')
 
-                # Term for S_kj = 1
-                Z_if_s_is_1 = model.NewIntVar(-M_vx_ik, M_vx_ik, f'Z_s1_{i}_{j}_{k}')
-                model.Add(Z_if_s_is_1 == VX_ik).OnlyEnforceIf(s_is_1_kj)
-                model.Add(Z_if_s_is_1 == 0).OnlyEnforceIf(s_is_1_kj.Not())
-
-                # Term for S_kj = -1
-                Z_if_s_is_neg1 = model.NewIntVar(-M_vx_ik, M_vx_ik, f'Z_s_neg1_{i}_{j}_{k}')
-                model.Add(Z_if_s_is_neg1 == -VX_ik).OnlyEnforceIf(s_is_neg1_kj) # Note the negation
-                model.Add(Z_if_s_is_neg1 == 0).OnlyEnforceIf(s_is_neg1_kj.Not())
-
-                # If S_kj is 0, both Z_if_s_is_1 and Z_if_s_is_neg1 will be 0.
-                # So term_prod_var = Z_if_s_is_1 + Z_if_s_is_neg1 correctly captures VX_ik * S_kj
-                term_prod_var = Z_if_s_is_1 + Z_if_s_is_neg1
+                # McCormick envelope constraints:
+                # term_prod_var <= M_Y_val * s_bin_kj
+                model.Add(term_prod_var <= M_Y_val * s_bin_kj)
+                # term_prod_var >= m_Y_val * s_bin_kj
+                model.Add(term_prod_var >= m_Y_val * s_bin_kj)
+                # term_prod_var <= Y_ik - m_Y_val * (1 - s_bin_kj)
+                model.Add(term_prod_var <= Y_ik - m_Y_val * (1 - s_bin_kj))
+                # term_prod_var >= Y_ik - M_Y_val * (1 - s_bin_kj)
+                model.Add(term_prod_var >= Y_ik - M_Y_val * (1 - s_bin_kj))
                 current_F_sum_terms.append(term_prod_var)
 
             if not current_F_sum_terms: # Should not happen if l_dim > 0
