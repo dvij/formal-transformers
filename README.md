@@ -8,7 +8,9 @@ The components are:
 - `V`: A known `d x d` matrix.
 - `W`: A known `d x d` matrix.
 - `X`: A `d x l` matrix of decision variables, where each element `X_ij` can take values `+1` or `-1`.
-- `s(Q)`: The element-wise sign function applied to matrix `Q`. If `Q_ab > 0`, `s(Q_ab) = 1`. If `Q_ab < 0`, `s(Q_ab) = -1`. If `Q_ab = 0`, `s(Q_ab) = 0`.
+- `s(Q)`: The element-wise modified sign function applied to matrix `Q`.
+  - If `Q_ab > 0` (strictly positive), then `s(Q_ab) = 1`.
+  - If `Q_ab <= 0` (zero or negative), then `s(Q_ab) = 0`.
 - `Q = X^T @ W @ X`: This results in an `l x l` matrix.
 - `@`: Denotes standard matrix multiplication.
 
